@@ -65,7 +65,8 @@ jobs:
           TRIGGER: ${{ github.event_name }}
           TRIGGER_SOURCE: ${{ github.event_name == 'schedule' && 'worker' || inputs.source }}
           GUARD_BOT_ID: ${{ vars.GUARD_BOT_ID }}
-          INCLUDE_NODES: ${{ vars.INCLUDE_NODES || 'node10.botkeep.cloud' }}
+          # 不设默认白名单：留空 = 接受任意节点（只受 EXCLUDE_NODES 黑名单约束）
+          INCLUDE_NODES: ${{ vars.INCLUDE_NODES }}
           EXCLUDE_NODES: ${{ vars.EXCLUDE_NODES || 'node2-it' }}
           SERVER_NAME: ${{ vars.SERVER_NAME || 'my-project' }}
           RAM_MB: ${{ vars.RAM_MB || '512' }}
