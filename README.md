@@ -20,7 +20,8 @@
 ├── scripts/
 │   ├── start_proxy.py       # 启动 sing-box 本地代理,写入 LOCAL_PROXY / PROXY_IP
 │   └── node_proxy.py        # 节点链接解析 + sing-box 配置生成(与上一个同目录)
-├── grab.yml                 # 工作流,需移动到 .github/workflows/grab.yml
+├── .github/workflows/
+│   └── grab.yml             # 工作流(已在正确位置,无需再移动)
 └── README.md
 ```
 
@@ -29,9 +30,9 @@
 ### 1. 创建仓库并上传文件
 
 1. 在 GitHub 新建仓库(公开仓库的 Actions 分钟数免费;私有仓库有月度额度,每 5 分钟一次会很快用完)。
-2. 解压压缩包,把里面的 `grab.mjs`、`package.json`、`README.md`、`grab.yml` 和 `scripts` 文件夹拖到仓库的 **Add file → Upload files** 页面,提交到 `main` 分支。
-3. 点开仓库里的 `grab.yml` → 右上角铅笔图标(Edit)→ 把顶部文件名改成 `.github/workflows/grab.yml`(输入 `/` 会自动建文件夹)→ **Commit changes**。GitHub 网页上传不接受以点开头的路径,所以必须这样移动。
-4. 到 Actions 页确认左侧出现 `grab`。
+2. 直接 `git push` 整个目录即可,`.github/workflows/grab.yml` 会在正确位置生效。
+3. 若只能用网页上传:先上传除 `.github` 外的文件,再用 **Add file → Create new file**,文件名输入 `.github/workflows/grab.yml` 并把内容粘贴进去。
+4. 到 Actions 页确认左侧出现 `botkeep`。
 
 ### 2. 配置 Secrets
 
@@ -69,6 +70,7 @@
 | `RAM_MB` | `512` | 内存 |
 | `CPU_PERCENT` | `50` | CPU 百分比 |
 | `STORAGE_MB` | `1024` | 磁盘 |
+| `GUARD_BOT_ID` | 空 | 守护模式:填了机器 id 就**只体检这台机器**(是否还在、节点是否合格),不抢新机,也不吃冷却 |
 | `INCLUDE_NODES` | `node10.botkeep.cloud` | 节点白名单(逗号分隔);非空时只接受这些节点,并忽略黑名单。请写完整域名 |
 | `EXCLUDE_NODES` | `node2-it` | 节点黑名单(逗号分隔);要关闭黑名单可填一个不存在的名字,如 `none` |
 | `RUN_SECONDS` | `240` | 单次运行轮询总时长 |
@@ -79,7 +81,7 @@
 ### 4. 首次手动运行
 
 1. 打开 **Actions** 页,如提示则点击启用工作流。
-2. 选择 `grab` → **Run workflow**。
+2. 选择 `botkeep` → **Run workflow**。
 3. 查看日志,确认出现 `登录成功`;使用代理时还应看到 `代理就绪,出口 IP`。
 4. Telegram 收到「🚀 Botkeep 抢机器服务已开启」即部署成功。
 
@@ -124,9 +126,9 @@
 
 ## 关于 Fork
 
-- 工作流里限定了 `github.repository`,只会在原仓库运行;fork 出去的仓库即使启用了 Actions,任务也会被跳过。
+- 本版本已移除 `github.repository_owner` 限制,fork 或复制到自己的仓库后,**配置自己的 Secrets 即可直接运行**。
 - Fork 不会复制 Secrets,也读不到原仓库的缓存,因此不会影响原作者的账号和状态。
-- 想自己使用的人,请新建仓库并把工作流里的仓库名改成自己的,再配置自己的 Secrets。
+- 请务必修改 `SERVER_NAME`、节点白名单等 Variables,避免和原作者抢同一批节点。
 
 ## 常见问题
 

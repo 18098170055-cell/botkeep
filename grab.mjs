@@ -2,6 +2,7 @@
 // 登录方式：COOKIE（浏览器 Cookie）或 邮箱+密码，缓存会话优先
 // 流程：登录 -> 启动TG通知 -> 轮询容量 -> 有容量立即创建 Node.js 满配服务器 -> 成功TG通知
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 const BASE = 'https://api.botkeep.cloud';
 const SITE = 'https://botkeep.cloud';
@@ -32,8 +33,13 @@ const EXCLUDE = (env.EXCLUDE_NODES ?? 'node2-it').split(',').map((x) => x.trim()
 const COOLDOWN_MIN = Number(env.COOLDOWN_MINUTES || 30); // 删机器后暂停多少分钟
 const SUCCESS_COOLDOWN_MIN = Number(env.SUCCESS_COOLDOWN_MINUTES || 1440); // 抢到后暂停多少分钟（默认 24 小时）
 const COOLDOWN_FILE = env.COOLDOWN_FILE || '.cooldown/until';
+const STATE_DIR = path.dirname(COOLDOWN_FILE);
 const RUN_SECONDS = Number(env.RUN_SECONDS || 240); // 单次运行轮询总时长
 const INTERVAL_SECONDS = Number(env.INTERVAL_SECONDS || 20); // 轮询间隔，别太小以免触发风控
+// 守护模式：填了这台机器 id 就只体检不抢新机（适合已经有机器、只想盯着它别掉的情况）
+const GUARD_ID = (env.GUARD_BOT_ID || '').trim();
+// 试运行：只读不写。不会创建、不会删除、不会进冷却，用来先看清账号里现在是什么状况
+const DRY_RUN = /^(1|true|yes|on)$/i.test(env.DRY_RUN || '');
 
 // 可选代理：LOCAL_PROXY=http://127.0.0.1:端口（由 start_proxy.py 根据 NODE_LINK 生成），只代理 Botkeep 请求
 const LOCAL_PROXY = env.LOCAL_PROXY || '';
@@ -123,10 +129,13 @@ const nodeLink = (loc) => {
   const h = nodeLabel(loc);
   return /\./.test(h) ? `<a href="https://${esc(h)}">${esc(h)}</a>` : esc(h);
 };
+// 判定用的节点文本：优先用 network 接口给出的真实 host，避免被 bot 名字里的 "node10" 骗过
+const nodeText = (loc) => (loc?.hosts?.length ? loc.hosts.join(' ') : loc?.info || '');
 // 返回不合格原因（null 表示合格）：白名单非空只看白名单，否则看黑名单
 // 节点匹配：node1 能匹配 node1-it、node1-de，但不会匹配 node10-xx
 const nodeHit = (info, n) => new RegExp(`(^|[^a-z0-9])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`).test(info);
-const badNode = (info) => {
+const badNode = (loc) => {
+  const info = nodeText(loc).toLowerCase();
   if (!info) return null; // 读不到节点时不判定
   if (INCLUDE.length) return INCLUDE.some((n) => nodeHit(info, n)) ? null : `不在白名单 ${INCLUDE.join(',')}`;
   const hit = EXCLUDE.find((n) => nodeHit(info, n));
@@ -161,8 +170,12 @@ async function handleExisting(notify = true) {
     const loc = await botLocation(b.id, 5);
     if (loc.gone) { log(`${b.name || b.id} 已删除，忽略`); continue; }
     if (!loc.info) { log(`${b.name || b.id} 读不到节点，本次不处理`); unknown = true; continue; }
-    const bad = badNode(loc.info);
+    const bad = badNode(loc);
     if (bad) {
+      if (DRY_RUN) {
+        log(`[dry-run] ${b.name || b.id} 节点不合格（${bad}），正式运行会删除它`);
+        continue;
+      }
       log(`已有服务器 ${b.name || b.id} 节点不合格（${bad}），删除`);
       await deleteBot(b.id);
       startCooldown();
@@ -172,6 +185,7 @@ async function handleExisting(notify = true) {
   }
   if (kept.length) {
     log(`账号已有合格服务器，暂停 ${SUCCESS_COOLDOWN_MIN} 分钟`);
+    if (DRY_RUN) { log('[dry-run] 不写冷却，不结束'); return true; }
     startCooldown(SUCCESS_COOLDOWN_MIN);
     if (notify) await tg(`✅ Botkeep：账号里已有服务器（${kept.join(', ')}），无需再抢。`);
     return true;
@@ -184,7 +198,7 @@ function cooldownLeft() {
   try { return Math.max(0, Number(fs.readFileSync(COOLDOWN_FILE, 'utf8')) - Date.now()); } catch { return 0; }
 }
 function startCooldown(min = COOLDOWN_MIN) {
-  fs.mkdirSync(COOLDOWN_FILE.split('/').slice(0, -1).join('/') || '.', { recursive: true });
+  fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(COOLDOWN_FILE, String(Date.now() + min * 60000));
 }
 class Cooldown extends Error {}
@@ -206,9 +220,9 @@ function unseal(b64) {
   d.setAuthTag(buf.subarray(12, 28));
   return Buffer.concat([d.update(buf.subarray(28)), d.final()]).toString('utf8');
 }
-const SESSION_FILE = (COOLDOWN_FILE.split('/').slice(0, -1).join('/') || '.') + '/session.json';
+const SESSION_FILE = path.join(STATE_DIR, 'session.json');
 function saveSession() {
-  fs.mkdirSync(SESSION_FILE.split('/').slice(0, -1).join('/'), { recursive: true });
+  fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(SESSION_FILE, seal(JSON.stringify({ email: EMAIL || '', cookies: [...jar] })), { mode: 0o600 });
 }
 async function login() {
@@ -242,7 +256,7 @@ function markBadCookie(bad) {
   try { st = JSON.parse(fs.readFileSync(NOTIFY_FILE, 'utf8')); } catch {}
   if (bad) st.badCookie = COOKIE_HASH; else delete st.badCookie;
   try {
-    fs.mkdirSync(NOTIFY_FILE.split('/').slice(0, -1).join('/') || '.', { recursive: true });
+    fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(NOTIFY_FILE, JSON.stringify(st));
   } catch {}
 }
@@ -291,7 +305,7 @@ async function relogin() {
 
 // Worker 触发：启动通知每小时最多一次，附带期间运行次数；手动触发：每次都通知
 const IS_WORKER = (env.TRIGGER_SOURCE || '') === 'worker';
-const NOTIFY_FILE = (COOLDOWN_FILE.split('/').slice(0, -1).join('/') || '.') + '/notify.json';
+const NOTIFY_FILE = path.join(STATE_DIR, 'notify.json');
 const NOTIFY_EVERY_MIN = Number(env.NOTIFY_EVERY_MINUTES || 60);
 function startNotice() {
   let st = {};
@@ -303,7 +317,7 @@ function startNotice() {
   const send = !IS_WORKER || Date.now() - (st.last || 0) >= (NOTIFY_EVERY_MIN - 3) * 60000;
   if (send && IS_WORKER) st.last = Date.now();
   delete st.count;
-  fs.mkdirSync(NOTIFY_FILE.split('/').slice(0, -1).join('/'), { recursive: true });
+  fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.writeFileSync(NOTIFY_FILE, JSON.stringify(st));
   return { send, line };
 }
@@ -316,13 +330,47 @@ function addAttempt() {
   try { fs.writeFileSync(NOTIFY_FILE, JSON.stringify(st)); } catch {}
 }
 
+// 守护模式：只体检指定机器（是否还在、节点是否合格），不抢新机。适合已经有机器、只想盯着它的情况。
+async function guard() {
+  const id = GUARD_ID;
+  let bot;
+  try {
+    bot = await api(`/api/v1/panel/bots/${encodeURIComponent(id)}`);
+  } catch (e) {
+    if (e.status === 404) {
+      log(`守护的机器 ${id} 已不存在`);
+      await tg(`⚠️ Botkeep：守护的机器 ${esc(id)} 已不存在（被回收或已删除）。`);
+      return;
+    }
+    throw e;
+  }
+  const loc = await botLocation(id, 30);
+  if (loc.gone) {
+    log(`守护的机器 ${id} 已删除`);
+    await tg(`⚠️ Botkeep：守护的机器 ${esc(id)} 已被删除。`);
+    return;
+  }
+  const st = bot?.status || bot?.state || bot?.operation?.phase || '未知';
+  const bad = badNode(loc);
+  log(`守护检查：${id} 状态 ${st}，节点 ${nodeLabel(loc)}${bad ? `，不合格（${bad}）` : ''}`);
+  const notice = startNotice();
+  if (!notice.send) { log('本小时已通知过，跳过 TG'); return; }
+  await tg(bad
+    ? `⚠️ Botkeep：${esc(id)} 状态 ${esc(st)}，节点 ${nodeLink(loc)} 不合格（${esc(bad)}）。`
+    : `✅ Botkeep：${esc(id)} 状态 ${esc(st)}，节点 ${nodeLink(loc)} 正常。`);
+}
+
 async function main() {
   if (!COOKIE && !(EMAIL && PASSWORD)) throw new Error('缺少 COOKIE，或缺少 BOTKEEP_EMAIL / BOTKEEP_PASSWORD');
-  const left = cooldownLeft();
-  if (left > 0) { log(`冷却中，还剩 ${Math.ceil(left / 60000)} 分钟，本次跳过`); return; }
 
   const how = await ensureLogin();
   log(`触发：${env.TRIGGER || '未知'}，${how} 出口IP ${LOCAL_PROXY ? (env.PROXY_IP || '代理') : '直连（GitHub）'}`);
+
+  // 守护模式不吃冷却：配了 GUARD_BOT_ID 就只体检这台机器，不抢新机
+  if (GUARD_ID) { await guard(); return; }
+
+  const left = cooldownLeft();
+  if (left > 0) { log(`冷却中，还剩 ${Math.ceil(left / 60000)} 分钟，本次跳过`); return; }
 
   // 已有服务器：黑名单节点删掉，合格的就结束
   if (await handleExisting()) return;
@@ -364,6 +412,7 @@ async function main() {
     try {
       const avail = await api('/api/v1/panel/creation-availability?' + qs);
       if (avail?.allowed) {
+        if (DRY_RUN) { log(`第${n}次：有容量，[dry-run] 跳过创建`); return; }
         log(`第${n}次：有容量，立即创建`);
         const bot = await api('/api/v1/panel/bots', {
           method: 'POST',
@@ -386,7 +435,13 @@ async function main() {
         const id = bot?.id || bot?.bot?.id || '';
         log('创建成功', JSON.stringify(bot).slice(0, 300));
         const loc = id ? await botLocation(id, 60) : { info: '', hosts: [] };
-        const bad = badNode(loc.info);
+        if (!id || !nodeText(loc)) {
+          // 读不到节点时不能当成"抢到了"：既不删也不冷却，下轮复查
+          log('已创建但暂时读不到节点信息，不进入冷却，下次运行复查');
+          await tg(`⚠️ Botkeep：已创建服务器 ${esc(id || '(未知 id)')}，但暂时读不到节点信息，下次运行会复查。`);
+          return;
+        }
+        const bad = badNode(loc);
         if (bad) {
           log(`节点不合格（${bad}），删除并暂停 ${COOLDOWN_MIN} 分钟`);
           await deleteBot(id);
