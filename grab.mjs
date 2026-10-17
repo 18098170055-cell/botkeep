@@ -54,6 +54,23 @@ const jar = new Map();
 const sleep = (s) => new Promise((r) => setTimeout(r, s * 1000));
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
+// 网络抖动重试：fetch failed / ECONNRESET 这类错误不该让整轮直接死掉
+const NET_ERR = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET']);
+async function fetchRetry(url, opts, tries = 4) {
+  let last;
+  for (let i = 1; i <= tries; i++) {
+    try { return await bkFetch(url, opts); } catch (e) {
+      last = e;
+      const code = e?.cause?.code || e?.code;
+      if (!NET_ERR.has(code) && !/fetch failed|socket/i.test(e.message || '')) throw e;
+      if (i === tries) break;
+      log(`网络异常（${code || e.message}），${i * 2}s 后重试 ${i}/${tries - 1}`);
+      await sleep(i * 2);
+    }
+  }
+  throw last;
+}
+
 function saveCookies(res) {
   const list = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
   for (const c of list) {
@@ -79,7 +96,7 @@ async function api(path, { method = 'GET', body, headers = {}, anonymous = false
     if (!csrf) csrf = (await api('/api/v1/auth/session')).csrf_token;
     h['X-CSRF-Token'] = csrf;
   }
-  const res = await bkFetch(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetchRetry(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
   saveCookies(res);
   const text = await res.text();
   let data = null;

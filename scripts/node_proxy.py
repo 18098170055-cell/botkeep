@@ -32,7 +32,8 @@ SING_BOX_VERSION = "1.14.1"
 # 可选：设置环境变量 SING_BOX_SHA256 为 tar.gz 的 sha256，则下载后强校验
 SING_BOX_SHA256_ENV = "SING_BOX_SHA256"
 
-SUPPORTED = ("vless", "vmess", "trojan", "ss", "socks5", "socks5h", "http", "https")
+SUPPORTED = ("vless", "vmess", "trojan", "ss", "socks5", "socks5h", "http", "https",
+             "hysteria2", "hy2", "tuic")
 SUPPORTED_NET = ("tcp", "ws", "grpc", "httpupgrade")
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -178,10 +179,56 @@ def normalize_plain(link):
             "password": urllib.parse.unquote(u.password or "")}
 
 
+def normalize_hysteria2(link):
+    """hysteria2://auth@host:port?sni=&insecure=1&obfs=salamander&obfs-password="""
+    u = urllib.parse.urlparse(link)
+    q = _q(u.query)
+    _warn_unknown(q, {"sni", "insecure", "allowInsecure", "allow_insecure", "skip-cert-verify",
+                      "obfs", "obfs-password", "obfs_password", "alpn", "up", "down", "pinSHA256"}, "hysteria2")
+    host = u.hostname or ""
+    # 密码可能在 userinfo，也可能在 query 的 auth/password
+    password = urllib.parse.unquote(u.username or "") or _g(q, "auth") or _g(q, "password")
+    if not host or not password:
+        raise RuntimeError("hysteria2 链接缺少 password 或 host")
+    obfs = _g(q, "obfs").lower()
+    if obfs and obfs != "salamander":
+        raise RuntimeError("hysteria2 obfs=%s 不受支持（仅 salamander）" % obfs)
+    return {
+        "scheme": "hysteria2", "password": password, "host": host, "port": u.port or 443,
+        "sni": _g(q, "sni", host),
+        "alpn": _g(q, "alpn"),
+        "obfs": obfs, "obfs_password": _g(q, "obfs-password", _g(q, "obfs_password")),
+        "up": _g(q, "up"), "down": _g(q, "down"),
+        "insecure": _truthy(q, "insecure", "allowInsecure", "allow_insecure", "skip-cert-verify"),
+    }
+
+
+def normalize_tuic(link):
+    """tuic://uuid:password@host:port?congestion_control=bbr&alpn=h3&sni=&allow_insecure=1"""
+    u = urllib.parse.urlparse(link)
+    q = _q(u.query)
+    _warn_unknown(q, {"congestion_control", "congestion", "alpn", "sni", "udp_relay_mode",
+                      "udp-relay-mode", "allow_insecure", "allowInsecure", "insecure",
+                      "skip-cert-verify", "disable_sni", "reduce_rtt"}, "tuic")
+    host = u.hostname or ""
+    uuid = urllib.parse.unquote(u.username or "")
+    password = urllib.parse.unquote(u.password or "") or _g(q, "password")
+    if not host or not uuid or not password:
+        raise RuntimeError("tuic 链接缺少 uuid/password/host")
+    return {
+        "scheme": "tuic", "uuid": uuid, "password": password, "host": host, "port": u.port or 443,
+        "sni": _g(q, "sni", host),
+        "alpn": _g(q, "alpn"),
+        "congestion_control": _g(q, "congestion_control", _g(q, "congestion", "bbr")),
+        "udp_relay_mode": _g(q, "udp_relay_mode", _g(q, "udp-relay-mode", "native")),
+        "insecure": _truthy(q, "allow_insecure", "allowInsecure", "insecure", "skip-cert-verify"),
+    }
+
+
 def normalize_link(raw):
     """第一步：把粘贴的原始链接整理成 (scheme, info)。"""
     raw = (raw or "").strip()
-    m = re.search(r"(vless|vmess|trojan|ss|shadowsocks|socks5h?|https?)://[^\s]+",
+    m = re.search(r"(vless|vmess|trojan|hysteria2|hy2|tuic|ss|shadowsocks|socks5h?|https?)://[^\s]+",
                   raw, re.IGNORECASE)
     if not m:
         raise RuntimeError("NODE_LINK 里没找到有效的节点链接")
@@ -189,13 +236,16 @@ def normalize_link(raw):
     scheme = link.split("://", 1)[0].lower()
     if scheme == "shadowsocks":
         scheme = "ss"
+    if scheme == "hy2":
+        scheme = "hysteria2"
     if scheme not in SUPPORTED:
         raise RuntimeError("NODE_LINK 协议不受支持：%s（支持 %s）" % (scheme, "/".join(SUPPORTED)))
     if scheme in ("http", "https", "socks5", "socks5h"):
         info = normalize_plain(link)
     else:
         info = {"vless": normalize_vless, "vmess": normalize_vmess,
-                "trojan": normalize_trojan, "ss": normalize_ss}[scheme](link)
+                "trojan": normalize_trojan, "ss": normalize_ss,
+                "hysteria2": normalize_hysteria2, "tuic": normalize_tuic}[scheme](link)
     print("节点已整理为固定格式：%s" % canonical_redacted(scheme, info))
     return scheme, info
 
@@ -215,6 +265,12 @@ def canonical_redacted(scheme, info):
         return "trojan://****@%s:%d?type=%s" % (i["host"], i["port"], i["net"])
     if scheme == "ss":
         return "ss(%s)://****@%s:%d" % (i["method"], i["host"], i["port"])
+    if scheme == "hysteria2":
+        return "hysteria2://****@%s:%d?sni=%s&insecure=%s" % (
+            i["host"], i["port"], i["sni"], i["insecure"])
+    if scheme == "tuic":
+        return "tuic://****@%s:%d?cc=%s&insecure=%s" % (
+            i["host"], i["port"], i["congestion_control"], i["insecure"])
     return scheme + "://****"
 
 
@@ -258,9 +314,14 @@ def _tls_block(server_name, fp="", alpn="", reality_pk="", reality_sid="", insec
     return tls
 
 
-def build_outbound(scheme, info):
-    """第二步：info -> sing-box outbound。"""
+def build_outbound(scheme, info, force_insecure=False):
+    """第二步：info -> sing-box outbound。
+
+    force_insecure=True 时对所有 TLS 出站强制 insecure（跳过证书校验），
+    用于 hy2 / tuic 这类自签或证书链异常的节点。
+    """
     i = info
+    ins = bool(i.get("insecure")) or bool(force_insecure)
     base = {"tag": "proxy", "server": i["host"], "server_port": i["port"]}
     if scheme == "vless":
         ob = dict(base, type="vless", uuid=i["uuid"])
@@ -270,14 +331,32 @@ def build_outbound(scheme, info):
             reality = i["security"] == "reality"
             ob["tls"] = _tls_block(i["sni"], i["fp"], i["alpn"],
                                    i["pbk"] if reality else "", i["sid"] if reality else "",
-                                   i["insecure"])
+                                   ins)
     elif scheme == "vmess":
         ob = dict(base, type="vmess", uuid=i["uuid"], alter_id=i["aid"], security="auto")
         if i["tls"]:
-            ob["tls"] = _tls_block(i["sni"], i["fp"], i["alpn"], insecure=i["insecure"])
+            ob["tls"] = _tls_block(i["sni"], i["fp"], i["alpn"], insecure=ins)
     elif scheme == "trojan":
         ob = dict(base, type="trojan", password=i["password"],
-                  tls=_tls_block(i["sni"], i["fp"], i["alpn"], insecure=i["insecure"]))
+                  tls=_tls_block(i["sni"], i["fp"], i["alpn"], insecure=ins))
+    elif scheme == "hysteria2":
+        ob = dict(base, type="hysteria2", password=i["password"])
+        ob["tls"] = _tls_block(i["sni"], "", i["alpn"] or "h3", insecure=ins)
+        if i["obfs"] == "salamander" and i["obfs_password"]:
+            ob["obfs"] = {"type": "salamander", "password": i["obfs_password"]}
+        for k in ("up", "down"):
+            if i.get(k):
+                try:
+                    ob["%s_mbps" % k] = int(float(i[k]))
+                except ValueError:
+                    raise RuntimeError("hysteria2 %s=%s 不是数字" % (k, i[k]))
+        return ob  # hysteria2 自带 QUIC 传输，没有 transport 字段
+    elif scheme == "tuic":
+        ob = dict(base, type="tuic", uuid=i["uuid"], password=i["password"],
+                  congestion_control=i["congestion_control"],
+                  udp_relay_mode=i["udp_relay_mode"])
+        ob["tls"] = _tls_block(i["sni"], "", i["alpn"] or "h3", insecure=ins)
+        return ob  # tuic 同样自带 QUIC 传输
     elif scheme == "ss":
         return dict(base, type="shadowsocks", method=i["method"], password=i["password"])
     elif scheme in ("socks5", "socks5h"):

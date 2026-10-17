@@ -8,7 +8,7 @@
 - 节点白名单 / 黑名单:抢到不想要的节点自动删除并冷却后重抢
 - 抢到后自动冷却 24 小时,期间只检查机器是否还在
 - 登录 Cookie 用 AES-256-GCM 加密后缓存,避免每次重新登录
-- 可选:通过 `NODE_LINK`(vless / vmess / trojan / ss / socks5 / http)走代理出口,由 sing-box 转成本地 HTTP 代理
+- 可选:通过 `NODE_LINK`(vless / vmess / trojan / ss / hysteria2 / tuic / socks5 / http)走代理出口,由 sing-box 转成本地 HTTP 代理
 - 日志脱敏,可安全用于公开仓库
 
 ## 文件结构
@@ -46,8 +46,10 @@
 | `STATE_KEY` | 建议 | 任意随机长字符串,用于加密缓存里的登录 Cookie;不设则由账号密码派生 |
 | `TG_BOT_TOKEN` | 否 | Telegram Bot Token(@BotFather 获取) |
 | `TG_CHAT_ID` | 否 | 接收通知的 chat id;不填则只打印日志 |
-| `NODE_LINK` | 否 | 代理节点链接;不填则 GitHub 机房直连 |
+| `NODE_LINK` | 否 | 代理节点链接(vless / vmess / trojan / ss / hysteria2 / tuic / socks5 / http);不填则 GitHub 机房直连 |
 | `SING_BOX_SHA256` | 否 | sing-box 压缩包的 sha256,设置后下载会强校验 |
+
+> **hy2 / tuic 连不上怎么办**:脚本会先用链接里的设置连,失败后自动强制 `insecure=true`(跳过证书验证)再试一次。也可以设 Variable `NODE_INSECURE=1` 直接跳过校验。这两个协议由 sing-box 原生支持,不需要换内核。
 
 #### 获取 COOKIE
 

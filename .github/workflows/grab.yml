@@ -49,6 +49,7 @@ jobs:
         if: env.NODE_LINK != ''
         env:
           SING_BOX_SHA256: ${{ secrets.SING_BOX_SHA256 }}
+          NODE_INSECURE: ${{ vars.NODE_INSECURE }}
         run: |
           npm install --no-audit --no-fund
           python3 scripts/start_proxy.py
