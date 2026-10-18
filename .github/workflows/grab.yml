@@ -74,6 +74,8 @@ jobs:
           STORAGE_MB: ${{ vars.STORAGE_MB || '1024' }}
           RUN_SECONDS: ${{ vars.RUN_SECONDS || '240' }}
           INTERVAL_SECONDS: ${{ vars.INTERVAL_SECONDS || '20' }}
+          COOLDOWN_MINUTES: ${{ vars.COOLDOWN_MINUTES || '3' }}
+          SUCCESS_COOLDOWN_MINUTES: ${{ vars.SUCCESS_COOLDOWN_MINUTES || '1440' }}
         run: node grab.mjs
 
       - name: Keepalive (re-enable schedule)
